@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const { body, validationResult } = require('express-validator');
+const { body, validationResult, ValidationError } = require('express-validator');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const knex = require('knex');
@@ -17,18 +17,25 @@ const db = knex({
   useNullAsDefault: true,
 });
 
-// Middleware d'authentification
-const authMiddleware = (req, res, next) => {
-  const token = req.headers.authorization?.split(' ')[1];
-  if (!token) return res.status(401).json({ error: 'Authentification requise' });
+// Middleware d'authentification amélioré
+const authMiddleware = (roles = []) => {
+  return (req, res, next) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    if (!token) return res.status(401).json({ error: 'Authentification requise' });
 
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
-    next();
-  } catch (error) {
-    res.status(401).json({ error: 'Token invalide' });
-  }
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      
+      if (roles.length > 0 && !roles.includes(decoded.role)) {
+        return res.status(403).json({ error: 'Permission refusée' });
+      }
+
+      req.user = decoded;
+      next();
+    } catch (error) {
+      res.status(401).json({ error: 'Token invalide' });
+    }
+  };
 };
 
 // Initialisation Express
@@ -43,6 +50,18 @@ app.use(rateLimit({
   max: 100
 }));
 
+// Middleware de validation centralisé
+const validate = (validations) => {
+  return async (req, res, next) => {
+    await Promise.all(validations.map(validation => validation.run(req)));
+
+    const errors = validationResult(req);
+    if (errors.isEmpty()) return next();
+
+    res.status(400).json({ errors: errors.array() });
+  };
+};
+
 // Conversion snake_case -> camelCase
 const toCamelCase = (book) => ({
   id: book.id,
@@ -56,27 +75,72 @@ const toCamelCase = (book) => ({
 });
 
 // Routes Publiques
-app.post('/login', async (req, res) => {
-  // À remplacer par une vérification en base de données
-  const validUser = {
-    id: 1,
-    username: 'admin',
-    password: await bcrypt.hash('admin123', 10)
-  };
+app.post('/register',
+  validate([
+    body('username').trim().notEmpty(),
+    body('email').isEmail(),
+    body('password').isLength({ min: 6 })
+  ]),
+  async (req, res) => {
+    try {
+      const { username, email, password } = req.body;
 
-  const { username, password } = req.body;
-  
-  if (username === validUser.username && await bcrypt.compare(password, validUser.password)) {
-    const token = jwt.sign(
-      { userId: validUser.id }, 
-      process.env.JWT_SECRET, 
-      { expiresIn: '1h' }
-    );
-    return res.json({ token });
+      const existingUser = await db('users').where({ email }).first();
+      if (existingUser) {
+        return res.status(400).json({ error: 'Email déjà utilisé' });
+      }
+
+      const salt = await bcrypt.genSalt(10);
+      const passwordHash = await bcrypt.hash(password, salt);
+
+      const [userId] = await db('users').insert({
+        username,
+        email,
+        password_hash: passwordHash,
+        role: 'user'
+      });
+
+      const token = jwt.sign(
+        { userId, role: 'user' }, 
+        process.env.JWT_SECRET, 
+        { expiresIn: '1h' }
+      );
+
+      res.status(201).json({ message: 'Utilisateur créé', token });
+
+    } catch (error) {
+      res.status(500).json({ error: 'Erreur lors de l\'inscription' });
+    }
   }
-  
-  res.status(401).json({ error: 'Identifiants invalides' });
-});
+);
+
+app.post('/login',
+  validate([
+    body('email').isEmail(),
+    body('password').notEmpty()
+  ]),
+  async (req, res) => {
+    try {
+      const { email, password } = req.body;
+      const user = await db('users').where({ email }).first();
+
+      if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+        return res.status(401).json({ error: 'Identifiants invalides' });
+      }
+
+      const token = jwt.sign(
+        { userId: user.id, role: user.role }, 
+        process.env.JWT_SECRET, 
+        { expiresIn: '1h' }
+      );
+
+      res.json({ token });
+
+    } catch (error) {
+      res.status(500).json({ error: 'Erreur de connexion' });
+    }
+  }
+);
 
 // Routes Livres
 app.get('/books', async (req, res) => {
@@ -98,18 +162,15 @@ app.get('/books/:id', async (req, res) => {
 });
 
 app.post('/books', 
-  authMiddleware,
-  [
+  authMiddleware(),
+  validate([
     body('title').trim().notEmpty(),
     body('author').trim().notEmpty(),
     body('publicationDate').isISO8601(),
     body('genre').trim().notEmpty(),
     body('pageCount').isInt({ min: 1 })
-  ],
+  ]),
   async (req, res) => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
-
     try {
       const [id] = await db('books').insert({
         title: req.body.title,
@@ -128,24 +189,23 @@ app.post('/books',
 );
 
 app.put('/books/:id',
-  authMiddleware,
-  [
+  authMiddleware(),
+  validate([
     body('title').optional().trim().notEmpty(),
     body('author').optional().trim().notEmpty(),
     body('publicationDate').optional().isISO8601(),
     body('genre').optional().trim().notEmpty(),
     body('pageCount').optional().isInt({ min: 1 })
-  ],
+  ]),
   async (req, res) => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
-
     try {
       const updated = await db('books')
         .where({ id: req.params.id })
         .update({
-          ...req.body,
+          title: req.body.title,
+          author: req.body.author,
           publication_date: req.body.publicationDate,
+          genre: req.body.genre,
           page_count: req.body.pageCount,
           updated_at: db.fn.now()
         });
@@ -160,7 +220,7 @@ app.put('/books/:id',
   }
 );
 
-app.delete('/books/:id', authMiddleware, async (req, res) => {
+app.delete('/books/:id', authMiddleware(['admin']), async (req, res) => {
   try {
     const deleted = await db('books').where({ id: req.params.id }).del();
     deleted ? res.status(204).end() : res.status(404).json({ error: 'Livre non trouvé' });
@@ -171,6 +231,17 @@ app.delete('/books/:id', authMiddleware, async (req, res) => {
 
 // Gestion des erreurs
 app.use((err, req, res, next) => {
+  if (err instanceof ValidationError) {
+    return res.status(400).json({ 
+      error: 'Données invalides',
+      details: err.array() 
+    });
+  }
+
+  if (err.name === 'JsonWebTokenError') {
+    return res.status(401).json({ error: 'Token JWT invalide' });
+  }
+
   console.error(err.stack);
   res.status(500).json({ 
     error: 'Erreur interne du serveur',
