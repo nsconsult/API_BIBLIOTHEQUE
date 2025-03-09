@@ -1,121 +1,183 @@
+require('dotenv').config();
 const express = require('express');
-const knex = require('knex')(require('./knexfile').development);
+const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const { body, validationResult } = require('express-validator');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+const knex = require('knex');
+
+// Configuration Knex avec SQLite
+const db = knex({
+  client: 'sqlite3',
+  connection: {
+    filename: process.env.DB_FILENAME,
+  },
+  useNullAsDefault: true,
+});
+
+// Middleware d'authentification
+const authMiddleware = (req, res, next) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Authentification requise' });
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (error) {
+    res.status(401).json({ error: 'Token invalide' });
+  }
+};
+
+// Initialisation Express
 const app = express();
 
+// Middlewares
 app.use(express.json());
+app.use(cors({ origin: 'http://localhost:3000' }));
+app.use(helmet());
+app.use(rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100
+}));
 
-// Conversion des clés snake_case vers camelCase
-function toCamelCase(book) {
-  return {
-    id: book.id,
-    title: book.title,
-    author: book.author,
-    publicationDate: book.publication_date,
-    genre: book.genre,
-    pageCount: book.page_count,
-    createdAt: book.created_at,
-    updatedAt: book.updated_at,
+// Conversion snake_case -> camelCase
+const toCamelCase = (book) => ({
+  id: book.id,
+  title: book.title,
+  author: book.author,
+  publicationDate: book.publication_date,
+  genre: book.genre,
+  pageCount: book.page_count,
+  createdAt: book.created_at,
+  updatedAt: book.updated_at,
+});
+
+// Routes Publiques
+app.post('/login', async (req, res) => {
+  // À remplacer par une vérification en base de données
+  const validUser = {
+    id: 1,
+    username: 'admin',
+    password: await bcrypt.hash('admin123', 10)
   };
-}
 
-// Middleware de validation
-function validateBook(req, res, next) {
-  const book = req.body;
-  const requiredFields = ['title', 'author', 'publicationDate', 'genre', 'pageCount'];
+  const { username, password } = req.body;
   
-  for (const field of requiredFields) {
-    if (!(field in book)) {
-      return res.status(400).json({ error: `Champ requis manquant : ${field}` });
-    }
+  if (username === validUser.username && await bcrypt.compare(password, validUser.password)) {
+    const token = jwt.sign(
+      { userId: validUser.id }, 
+      process.env.JWT_SECRET, 
+      { expiresIn: '1h' }
+    );
+    return res.json({ token });
   }
+  
+  res.status(401).json({ error: 'Identifiants invalides' });
+});
 
-  if (typeof book.title !== 'string' || book.title.trim() === '') {
-    return res.status(400).json({ error: 'Le titre doit être une chaîne non vide' });
-  }
-
-  if (typeof book.author !== 'string' || book.author.trim() === '') {
-    return res.status(400).json({ error: "L'auteur doit être une chaîne non vide" });
-  }
-
-  if (!Date.parse(book.publicationDate)) {
-    return res.status(400).json({ error: 'Date de publication invalide' });
-  }
-
-  if (typeof book.genre !== 'string' || book.genre.trim() === '') {
-    return res.status(400).json({ error: 'Le genre doit être une chaîne non vide' });
-  }
-
-  if (typeof book.pageCount !== 'number' || book.pageCount <= 0) {
-    return res.status(400).json({ error: 'Le nombre de pages doit être un entier positif' });
-  }
-
-  next();
-}
-
-// Routes
+// Routes Livres
 app.get('/books', async (req, res) => {
   try {
-    const books = await knex('books').select('*');
+    const books = await db('books').select('*');
     res.json(books.map(toCamelCase));
   } catch (error) {
-    res.status(500).json({ error: 'Erreur lors de la récupération des livres' });
+    res.status(500).json({ error: 'Erreur de récupération des livres' });
   }
 });
 
 app.get('/books/:id', async (req, res) => {
   try {
-    const book = await knex('books').where({ id: req.params.id }).first();
+    const book = await db('books').where({ id: req.params.id }).first();
     book ? res.json(toCamelCase(book)) : res.status(404).json({ error: 'Livre non trouvé' });
   } catch (error) {
-    res.status(500).json({ error: 'Erreur lors de la récupération du livre' });
+    res.status(500).json({ error: 'Erreur de récupération du livre' });
   }
 });
 
-app.post('/books', validateBook, async (req, res) => {
-  try {
-    const [id] = await knex('books').insert({
-      title: req.body.title,
-      author: req.body.author,
-      publication_date: req.body.publicationDate,
-      genre: req.body.genre,
-      page_count: req.body.pageCount,
-    });
-    
-    const newBook = await knex('books').where({ id }).first();
-    res.status(201).json(toCamelCase(newBook));
-  } catch (error) {
-    res.status(500).json({ error: 'Erreur lors de la création du livre' });
-  }
-});
+app.post('/books', 
+  authMiddleware,
+  [
+    body('title').trim().notEmpty(),
+    body('author').trim().notEmpty(),
+    body('publicationDate').isISO8601(),
+    body('genre').trim().notEmpty(),
+    body('pageCount').isInt({ min: 1 })
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-app.put('/books/:id', validateBook, async (req, res) => {
-  try {
-    const updated = await knex('books')
-      .where({ id: req.params.id })
-      .update({
+    try {
+      const [id] = await db('books').insert({
         title: req.body.title,
         author: req.body.author,
         publication_date: req.body.publicationDate,
         genre: req.body.genre,
-        page_count: req.body.pageCount,
-        updated_at: knex.fn.now()
+        page_count: req.body.pageCount
       });
-
-    updated ? res.json(toCamelCase(await knex('books').where({ id: req.params.id }).first())) 
-           : res.status(404).json({ error: 'Livre non trouvé' });
-  } catch (error) {
-    res.status(500).json({ error: 'Erreur lors de la mise à jour du livre' });
+      
+      const newBook = await db('books').where({ id }).first();
+      res.status(201).json(toCamelCase(newBook));
+    } catch (error) {
+      res.status(500).json({ error: 'Erreur de création du livre' });
+    }
   }
-});
+);
 
-app.delete('/books/:id', async (req, res) => {
+app.put('/books/:id',
+  authMiddleware,
+  [
+    body('title').optional().trim().notEmpty(),
+    body('author').optional().trim().notEmpty(),
+    body('publicationDate').optional().isISO8601(),
+    body('genre').optional().trim().notEmpty(),
+    body('pageCount').optional().isInt({ min: 1 })
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+    try {
+      const updated = await db('books')
+        .where({ id: req.params.id })
+        .update({
+          ...req.body,
+          publication_date: req.body.publicationDate,
+          page_count: req.body.pageCount,
+          updated_at: db.fn.now()
+        });
+
+      if (!updated) return res.status(404).json({ error: 'Livre non trouvé' });
+      
+      const book = await db('books').where({ id: req.params.id }).first();
+      res.json(toCamelCase(book));
+    } catch (error) {
+      res.status(500).json({ error: 'Erreur de mise à jour du livre' });
+    }
+  }
+);
+
+app.delete('/books/:id', authMiddleware, async (req, res) => {
   try {
-    const deleted = await knex('books').where({ id: req.params.id }).del();
+    const deleted = await db('books').where({ id: req.params.id }).del();
     deleted ? res.status(204).end() : res.status(404).json({ error: 'Livre non trouvé' });
   } catch (error) {
-    res.status(500).json({ error: 'Erreur lors de la suppression du livre' });
+    res.status(500).json({ error: 'Erreur de suppression du livre' });
   }
 });
 
-const PORT = 3000;
-app.listen(PORT, () => console.log(`API démarrée sur http://localhost:${PORT}`));
+// Gestion des erreurs
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ 
+    error: 'Erreur interne du serveur',
+    ...(process.env.NODE_ENV === 'development' && { details: err.message })
+  });
+});
+
+// Démarrage du serveur
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Serveur démarré sur http://localhost:${PORT}`));
