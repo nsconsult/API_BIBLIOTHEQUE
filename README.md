@@ -62,7 +62,7 @@ LOG_LEVEL="debug"
 # URL de l'application frontale
 FRONTEND_URL="http://localhost:3000"
 DB_FILENAME="dev.sqlite3"
-CLÉ_SECRÈTE_JWT="clé_secrète_complexe_ici"
+JWT_SECRET="clé_secrète_complexe_ici"
 
 # Paramètres Gmail
 SMTP_HOST="smtp.gmail.com"
