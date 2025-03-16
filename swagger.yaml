@@ -1,0 +1,275 @@
+openapi: 3.0.0
+info:
+  title: Bibliothèque API
+  version: 1.0.0
+  description: API de gestion de livres avec authentification JWT
+servers:
+  - url: http://localhost:3000
+    description: Serveur de développement
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT avec rôle admin requis pour les opérations de suppression
+  schemas:
+    Book:
+      type: object
+      required:
+        - title
+        - author
+        - publicationDate
+        - genre
+        - pageCount
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+          minLength: 1
+        author:
+          type: string
+          minLength: 1
+        publicationDate:
+          type: string
+          format: date
+        genre:
+          type: string
+          minLength: 1
+        pageCount:
+          type: integer
+          minimum: 1
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+
+paths:
+  /books:
+    get:
+      tags: [Books]
+      summary: Liste tous les livres
+      responses:
+        200:
+          description: Liste des livres
+          content:
+            application/json:
+              schema:
+                type: array
+                items: 
+                  $ref: '#/components/schemas/Book'
+    post:
+      tags: [Books]
+      summary: Créer un nouveau livre
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Book'
+      responses:
+        201:
+          description: Livre créé
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Book'
+        400:
+          description: Données invalides
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /books/{id}:
+    get:
+      tags: [Books]
+      summary: Récupère un livre par ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        200:
+          description: Détails du livre
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Book'
+        404:
+          description: Livre non trouvé
+    put:
+      tags: [Books]
+      summary: Met à jour un livre
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Book'
+      responses:
+        200:
+          description: Livre mis à jour
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Book'
+    delete:
+      tags: [Books]
+      summary: Supprime un livre (Admin uniquement)
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        204:
+          description: Livre supprimé
+        403:
+          description: Permissions insuffisantes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "Permissions insuffisantes. Rôle admin requis."
+        404:
+          description: Livre non trouvé
+
+  /login:
+    post:
+      tags: [Authentication]
+      summary: Authentification utilisateur
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+                - password
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+      responses:
+        200:
+          description: Connexion réussie
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+
+  /register:
+    post:
+      tags: [Authentication]
+      summary: Enregistrement utilisateur
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - username
+                - email
+                - password
+              properties:
+                username:
+                  type: string
+                  minLength: 3
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  minLength: 6
+      responses:
+        201:
+          description: Utilisateur créé
+
+  /verify-email:
+    get:
+      tags: [Authentication]
+      summary: Vérification d'email
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: Email vérifié
+
+  /forgot-password:
+    post:
+      tags: [Authentication]
+      summary: Demande réinitialisation mot de passe
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+              properties:
+                email:
+                  type: string
+                  format: email
+      responses:
+        200:
+          description: Email envoyé
+
+  /reset-password:
+    post:
+      tags: [Authentication]
+      summary: Réinitialisation mot de passe
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - token
+                - password
+              properties:
+                token:
+                  type: string
+                password:
+                  type: string
+                  minLength: 6
+      responses:
+        200:
+          description: Mot de passe mis à jour
